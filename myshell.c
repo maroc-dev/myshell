@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <errno.h>
 
 #define BUFSIZE 255
 #define INITIAL_CAPACITY 10
@@ -39,7 +41,7 @@ void init_arrlist(arraylist_t *al) {
 
 void free_arrlist(arraylist_t *al) {
     if (al == NULL) return;
-    
+
     if (al->val) {
         for (size_t i = 0; i < al->size; i++) {
             if (al->val[i]) {
@@ -73,7 +75,7 @@ void arrlist_push(arraylist_t *al, char *item) {
 
 void free_command(command *c) {
     if (c == NULL) return;
-    
+
     if (c->execpath) {
         free(c->execpath);
         c->execpath = NULL;
@@ -88,9 +90,89 @@ void free_command(command *c) {
     }
     if (c->args) {
         free_arrlist(c->args);
-        c->args = NULL;
     }
     free(c);
+}
+
+
+void myexit(command *c){
+    for (int i = 0; i < c->args->size; i++){
+        printf("%s ", c->args->val[i]);
+    }
+
+    printf("\nExiting shell...\n");
+    free_command(c);
+    exit(EXIT_SUCCESS);
+}
+
+void mywhich(command *c){
+    if (c->args->size != 1){
+        fprintf(stderr, "Improper usage of which: which <command>\n");
+        return;
+    }
+
+    char *path_env = getenv("PATH");
+    char *path = mystrdup(path_env);
+
+    if (path == NULL) {
+        perror("PATH variable not found.\n");
+        return;
+    }
+    char *token = strtok(path, ":");
+    char *token_path = NULL;
+    char *cmd = c->args->val[0];
+
+    while (token != NULL) {
+        size_t size_needed = strlen(token) + strlen(cmd) + 2;
+        token_path = realloc(token_path, size_needed);
+        if (token_path == NULL) {
+            perror("realloc failed");
+            exit(EXIT_FAILURE);
+        }
+
+        snprintf(token_path, size_needed, "%s/%s", token, cmd);
+        if (access(token_path, F_OK) == 0) {
+            printf("%s\n", token_path);
+            free(token_path);
+            free(path);
+            return;
+        }
+
+        token = strtok(NULL, ":");
+    }
+
+    free(token_path);
+    free(path);
+}
+void mypwd(command *c){
+    char *cwd = getcwd(NULL, 0);
+    if (cwd != NULL) {
+        printf("%s\n", cwd);
+        free(cwd);
+    } else {
+        fprintf(stderr, "pwd: getcwd error");
+        return;
+    }
+}
+
+void mycd(command *c) {
+    if (c->args->size != 1) {
+        fprintf(stderr, "Improper usage of cd: cd <directory>\n");
+        return;
+    }
+
+    char *dir = c->args->val[0];
+
+    if (chdir(dir) == 0) {
+        char *cwd = getcwd(NULL, 0);
+        if (cwd != NULL) {
+            free(cwd);
+        } else {
+            fprintf(stderr, "cd: Error retrieving the current working directory");
+        }
+    } else {
+        fprintf(stderr,"cd: %s\n", strerror(errno));
+    }
 }
 
 void launcher(command *c){
@@ -99,33 +181,26 @@ void launcher(command *c){
 
     // exit command
     if (strcmp(c->execpath, "exit") == 0) {
-
-        for (int i = 0; i < c->args->size; i++){
-            printf("%s ", c->args->val[i]);
-        }
-
-        printf("\nExiting shell...\n");
-        free_command(c);
-        exit(EXIT_SUCCESS);
+        myexit(c);
     }
+    // which command 
     else if (strcmp(c->execpath, "which") == 0){
-        if (c->args->size != 1){
-            fprintf(stderr, "Improper usage of which: which <command>\n");
-            return;
-        }
-
-        char *path = getenv("PATH");
-
-        if (path != NULL) {
-            fprintf(stderr, "PATH: %s\n", path);
-        } else {
-            perror("PATH variable not found.\n");
-            return;
-        }
-
-        printf("%s\n", path);
-
+        mywhich(c);
+        return;
     }
+    // pwd command 
+    else if (strcmp(c->execpath, "pwd") == 0) {
+        mypwd(c);
+        return;
+    }
+    // cd command 
+    else if (strcmp(c->execpath, "cd") == 0) {
+        mycd(c);
+        return;
+    }
+
+
+
 }
 
 void tokenize(char *buf, int should_exit) {
