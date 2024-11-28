@@ -4,17 +4,36 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <errno.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
-#define BUFSIZE 255
-#define INITIAL_CAPACITY 10
 #define _stdin 0
 
+// Token types
+typedef enum {
+    TOK_WORD,     // Regular word/argument
+    TOK_REDIRECT_IN,  // < input redirection
+    TOK_REDIRECT_OUT, // > output redirection
+    TOK_PIPE,     // | pipe
+    TOK_NEWLINE,  // Newline
+    TOK_END       // End of stream
+} tok_type;
+
+// Dynamic string buffer
+typedef struct {
+    char *data;
+    size_t size;
+    size_t capacity;
+} dyn_string;
+
+// Dynamic array list
 typedef struct {
     char **val;
     size_t size;
     size_t capacity;
 } arraylist_t;
 
+// Command structure
 typedef struct command {
     arraylist_t *args;
     char *execpath;
@@ -22,23 +41,92 @@ typedef struct command {
     char *outputfile;
 } command;
 
-char *mystrdup(const char *s) {
-    char *dup = malloc(strlen(s) + 1);
-    if (dup) {
-        strcpy(dup, s);
+// Custom strdup implementation
+char *strdup(const char *s) {
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char *copy = malloc(len);
+    if (copy) {
+        memcpy(copy, s, len);
     }
-    return dup;
+    return copy;
 }
 
+// Initialize dynamic string
+void init_dyn_string(dyn_string *str) {
+    str->data = malloc(10);  // Initial capacity
+    if (!str->data) {
+        perror("Failed to allocate dynamic string");
+        exit(EXIT_FAILURE);
+    }
+    str->size = 0;
+    str->capacity = 10;
+    str->data[0] = '\0';
+}
+
+// Ensure capacity for dynamic string
+void ensure_dyn_string_capacity(dyn_string *str, size_t needed_size) {
+    if (str->size + needed_size >= str->capacity) {
+        while (str->size + needed_size >= str->capacity) {
+            str->capacity *= 2;
+        }
+        char *new_data = realloc(str->data, str->capacity);
+        if (!new_data) {
+            perror("Failed to resize dynamic string");
+            exit(EXIT_FAILURE);
+        }
+        str->data = new_data;
+    }
+}
+
+// Append to dynamic string
+void append_dyn_string(dyn_string *str, char c) {
+    ensure_dyn_string_capacity(str, 2);  // 1 for char, 1 for null terminator
+    str->data[str->size++] = c;
+    str->data[str->size] = '\0';
+}
+
+// Free dynamic string
+void free_dyn_string(dyn_string *str) {
+    free(str->data);
+    str->data = NULL;
+    str->size = 0;
+    str->capacity = 0;
+}
+
+// Allocate and initialize arraylist
 void init_arrlist(arraylist_t *al) {
     al->size = 0;
-    al->capacity = INITIAL_CAPACITY;
-    al->val = malloc(INITIAL_CAPACITY * sizeof(char *));
+    al->capacity = 10;  // Initial capacity
+    al->val = malloc(al->capacity * sizeof(char *));
     if (al->val == NULL) {
         exit(EXIT_FAILURE);
     }
 }
 
+// Push item to arraylist
+void arrlist_push(arraylist_t *al, char *item) {
+    if (al->size == al->capacity) {
+        al->capacity *= 2;
+        char **new_val = realloc(al->val, al->capacity * sizeof(char *));
+        if (new_val == NULL) {
+            // Free existing memory and exit
+            for (size_t i = 0; i < al->size; i++) {
+                free(al->val[i]);
+            }
+            free(al->val);
+            exit(EXIT_FAILURE);
+        }
+        al->val = new_val;
+    }
+    al->val[al->size] = strdup(item);
+    if (al->val[al->size] == NULL) {
+        exit(EXIT_FAILURE);
+    }
+    al->size++;
+}
+
+// Free arraylist
 void free_arrlist(arraylist_t *al) {
     if (al == NULL) return;
 
@@ -52,27 +140,9 @@ void free_arrlist(arraylist_t *al) {
         free(al->val);
         al->val = NULL;
     }
-    free(al);
 }
 
-void arrlist_push(arraylist_t *al, char *item) {
-    if (al->size == al->capacity) {
-        al->capacity *= 2;
-        char **new_val = realloc(al->val, al->capacity * sizeof(char *));
-        if (new_val == NULL) {
-            free_arrlist(al);
-            exit(EXIT_FAILURE);
-        }
-        al->val = new_val;
-    }
-    al->val[al->size] = mystrdup(item);
-    if (al->val[al->size] == NULL) {
-        free_arrlist(al);
-        exit(EXIT_FAILURE);
-    }
-    al->size++;
-}
-
+// Free command structure
 void free_command(command *c) {
     if (c == NULL) return;
 
@@ -90,13 +160,77 @@ void free_command(command *c) {
     }
     if (c->args) {
         free_arrlist(c->args);
+        free(c->args);
     }
     free(c);
 }
 
+void execute_external_command(command *c) {
+    pid_t pid = fork();
 
-void myexit(command *c){
-    for (int i = 0; i < c->args->size; i++){
+    if (pid < 0) {
+        perror("Fork failed");
+        return;
+    } else if (pid == 0) {  // Child process
+        // Handle input redirection
+        if (c->inputfile) {
+            int input_fd = open(c->inputfile, O_RDONLY);
+            if (input_fd < 0) {
+                perror("Input file open failed");
+                return;
+            }
+            if (dup2(input_fd, STDIN_FILENO) < 0) {
+                perror("dup2 for input redirection failed");
+                close(input_fd);
+                return;
+            }
+            close(input_fd); // Close the original file descriptor
+        }
+
+        // Handle output redirection
+        if (c->outputfile) {
+            int output_fd = open(c->outputfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (output_fd < 0) {
+                perror("Output file open failed");
+                exit(EXIT_FAILURE);
+            }
+            if (dup2(output_fd, STDOUT_FILENO) < 0) {
+                perror("dup2 for output redirection failed");
+                close(output_fd);
+                exit(EXIT_FAILURE);
+            }
+            close(output_fd); // Close the original file descriptor
+        }
+
+        // Prepare arguments for execv
+        char **argv = malloc((c->args->size + 2) * sizeof(char *));
+        if (!argv) {
+            perror("Memory allocation failed");
+            exit(EXIT_FAILURE);
+        }
+
+        argv[0] = c->execpath;
+        for (size_t i = 0; i < c->args->size; i++) {
+            argv[i + 1] = c->args->val[i];
+        }
+        argv[c->args->size + 1] = NULL;
+
+        // Execute the command
+        execv(c->execpath, argv);
+
+        // If execv fails
+        perror("Command execution failed");
+        free(argv);
+        exit(EXIT_FAILURE);
+    } else {  // Parent process
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+// Command implementations
+void myexit(command *c) {
+    for (int i = 0; i < c->args->size; i++) {
         printf("%s ", c->args->val[i]);
     }
 
@@ -105,14 +239,14 @@ void myexit(command *c){
     exit(EXIT_SUCCESS);
 }
 
-void mywhich(command *c){
-    if (c->args->size != 1){
+void mywhich(command *c) {
+    if (c->args->size != 1) {
         fprintf(stderr, "Improper usage of which: which <command>\n");
         return;
     }
 
     char *path_env = getenv("PATH");
-    char *path = mystrdup(path_env);
+    char *path = strdup(path_env);
 
     if (path == NULL) {
         perror("PATH variable not found.\n");
@@ -144,7 +278,8 @@ void mywhich(command *c){
     free(token_path);
     free(path);
 }
-void mypwd(command *c){
+
+void mypwd(command *c) {
     char *cwd = getcwd(NULL, 0);
     if (cwd != NULL) {
         printf("%s\n", cwd);
@@ -175,16 +310,14 @@ void mycd(command *c) {
     }
 }
 
-void launcher(command *c){
-
-    // prebuilt myshell commands
-
+// Launcher for built-in commands
+void launcher(command *c) {
     // exit command
     if (strcmp(c->execpath, "exit") == 0) {
         myexit(c);
     }
     // which command 
-    else if (strcmp(c->execpath, "which") == 0){
+    else if (strcmp(c->execpath, "which") == 0) {
         mywhich(c);
         return;
     }
@@ -198,103 +331,208 @@ void launcher(command *c){
         mycd(c);
         return;
     }
-
-
-
+    // For non-built-in commands, try to execute externally
+    else {
+        execute_external_command(c);
+    }
 }
 
-void tokenize(char *buf, int should_exit) {
-    char *token = strtok(buf, " ");
-    command *c = malloc(sizeof(command));
-    if (!c) {
-        perror("Failed to allocate memory for command");
-        exit(EXIT_FAILURE);
+tok_type next_token(char **cursor, dyn_string *token_value) {
+    char *start = *cursor;
+    
+    // Reset dynamic string
+    token_value->size = 0;
+    token_value->data[0] = '\0';
+    
+    // Skip leading whitespace
+    while (*start && (*start == ' ' || *start == '\t')) {
+        start++;
     }
     
-    // Initialize all fields
-    c->args = NULL;
-    c->execpath = NULL;
-    c->inputfile = NULL;
-    c->outputfile = NULL;
-    
-    c->args = malloc(sizeof(arraylist_t));
-    if (!c->args) {
-        perror("Failed to allocate memory for args");
-        free_command(c);
-        exit(EXIT_FAILURE);
+    // End of string or just whitespace
+    if (*start == '\0' || *start == '\n') {
+        *cursor = start;
+        return TOK_END;
     }
     
-    init_arrlist(c->args);
-    
-    for (int i = 0; token != NULL; i++) {
-        printf("Token: %s\n", token);
-        if (i == 0) {
-            c->execpath = mystrdup(token);
-            token = strtok(NULL, " ");
-            continue;
-        }
-        arrlist_push(c->args, token);
-        token = strtok(NULL, " ");
+    // Redirection and pipe
+    if (*start == '<') {
+        *cursor = start + 1;
+        return TOK_REDIRECT_IN;
+    }
+    if (*start == '>') {
+        *cursor = start + 1;
+        return TOK_REDIRECT_OUT;
+    }
+    if (*start == '|') {
+        *cursor = start + 1;
+        return TOK_PIPE;
     }
     
-    launcher(c);
-
-    free_command(c);
+    // Word/argument parsing
+    while (*start && 
+           *start != ' ' && 
+           *start != '\t' && 
+           *start != '<' && 
+           *start != '>' && 
+           *start != '|' && 
+           *start != '\n') {
+        append_dyn_string(token_value, *start);
+        start++;
+    }
+    
+    if (token_value->size > 0) {
+        *cursor = start;
+        return TOK_WORD;
+    }
+    
+    // Unexpected case
+    *cursor = start;
+    return TOK_END;
 }
 
-
-
-void get_args(int fd) {
-    int bytes, wordstart, pos;
-    int bufsize = BUFSIZE;
+void parse_input(int fd) {
+    int bufsize = 4;  // Start with small initial size
+    int total_bytes_read = 0;
     char *buf = malloc(bufsize);
     if (buf == NULL) {
         perror("Buffer allocation failed");
         return;
     }
-    
-    pos = 0;
-    wordstart = 0;
-    
-    while ((bytes = read(fd, buf + pos, bufsize - pos)) > 0) {
-        int bufend = pos + bytes;
-        for (; pos < bufend; pos++) {
-            if (buf[pos] == '\n') {
-                buf[pos] = '\0';
-                if (wordstart < pos) {
-                    tokenize(buf + wordstart, 0);
+
+    // Dynamic buffer reading
+    while (1) {
+        // Ensure space for reading and null termination
+        if (total_bytes_read >= bufsize - 1) {
+            bufsize *= 2;
+            char *new_buf = realloc(buf, bufsize);
+            if (new_buf == NULL) {
+                perror("Buffer reallocation failed");
+                free(buf);
+                return;
+            }
+            buf = new_buf;
+        }
+
+        // Read into the remaining buffer space
+        int bytes_read = read(fd, buf + total_bytes_read, bufsize - total_bytes_read - 1);
+        
+        if (bytes_read <= 0) {
+            // No more input or error
+            if (total_bytes_read == 0) {
+                free(buf);
+                return;
+            }
+            break;
+        }
+
+        total_bytes_read += bytes_read;
+        buf[total_bytes_read] = '\0';
+
+        // Check if we've read a full line
+        if (memchr(buf, '\n', total_bytes_read) != NULL) {
+            break;
+        }
+    }
+
+    // Trim trailing newline
+    if (total_bytes_read > 0 && buf[total_bytes_read - 1] == '\n') {
+        buf[total_bytes_read - 1] = '\0';
+        total_bytes_read--;
+    }
+
+    // Skip completely empty input
+    if (total_bytes_read == 0) {
+        free(buf);
+        return;
+    }
+
+    // Create command structure
+    command *c = malloc(sizeof(command));
+    if (!c) {
+        perror("Failed to allocate command");
+        free(buf);
+        return;
+    }
+
+    // Initialize command fields
+    c->args = malloc(sizeof(arraylist_t));
+    init_arrlist(c->args);
+    c->execpath = NULL;
+    c->inputfile = NULL;
+    c->outputfile = NULL;
+
+    // Tokenize the command
+    char *cursor = buf;
+    dyn_string token_value;
+    init_dyn_string(&token_value);
+
+    tok_type type;
+    int is_first_token = 1;
+    int redir_in = 0;
+    int redir_out = 0;
+
+    while ((type = next_token(&cursor, &token_value)) != TOK_END) {
+        switch (type) {
+            case TOK_WORD:
+                if (is_first_token) {
+                    // First token is the command/executable path
+                    c->execpath = strdup(token_value.data);
+                    is_first_token = 0;
+                } else {
+
+                    if (redir_in == 1){
+                        c->inputfile = strdup(token_value.data);
+                        redir_in = 0;
+                        break;
+                    }
+                    else if (redir_out == 1){
+                        c->outputfile = strdup(token_value.data);
+                        redir_in = 0;
+                        break;
+                    }
+
+                    // Subsequent tokens are arguments
+                    arrlist_push(c->args, token_value.data);
+                }
+                break;
+            case TOK_REDIRECT_IN:
+                if (redir_in == 1 || redir_out == 1){
+                    fprintf(stdout, "Invalid syntax for redirection in: expected file");
+                    free_dyn_string(&token_value);
+                    free_command(c);
                     free(buf);
                     return;
                 }
-                wordstart = pos + 1;
-            }
-        }
-        
-        if (wordstart == pos) {
-            pos = 0;
-        } else if (wordstart > 0) {
-            int seglength = pos - wordstart;
-            memmove(buf, buf + wordstart, seglength);
-            pos = seglength;
-        } else if (pos >= bufsize - 2) {
-            bufsize *= 2;
-            char *newbuf = realloc(buf, bufsize);
-            if (newbuf == NULL) {
-                free(buf);
-                perror("Buffer reallocation failed");
-                return;
-            }
-            buf = newbuf;
-        }
-        wordstart = 0;
-    }
-    
-    if (wordstart < pos) {
-        buf[pos] = '\0';
-        if (pos > wordstart) {
-            tokenize(buf + wordstart, 0);
+                redir_in = 1;
+                break;
+            case TOK_REDIRECT_OUT:
+            if (redir_in == 1 || redir_out == 1){
+                    fprintf(stdout, "Invalid syntax for redirection out: expected file");
+                    free_dyn_string(&token_value);
+                    free_command(c);
+                    free(buf);
+                    return;
+                }
+                redir_out = 1;
+                break;
+            case TOK_PIPE:
+                break;
+            case TOK_NEWLINE:
+                break;
+            default:
+                break;
         }
     }
+
+    // Launch built-in or external commands only if we have a valid execpath
+    if (c->execpath && strlen(c->execpath) > 0) {
+        launcher(c);
+    }
+
+    // Free resources
+    free_dyn_string(&token_value);
+    free_command(c);
     free(buf);
 }
 
@@ -304,7 +542,7 @@ int main() {
     while (1) {
         printf("mysh> ");
         fflush(stdout);
-        get_args(_stdin);
+        parse_input(_stdin);
     }
     
     return EXIT_SUCCESS;
