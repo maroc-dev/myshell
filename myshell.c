@@ -39,6 +39,7 @@ typedef struct command {
     char *execpath;
     char *inputfile;
     char *outputfile;
+    struct command *next_command;  // Pointer to next command in a pipe chain
 } command;
 
 // Custom strdup implementation
@@ -165,6 +166,45 @@ void free_command(command *c) {
     free(c);
 }
 
+int search_exec(command *c) {
+    const char *allowed_dirs[] = {"/usr/local/bin", "/usr/bin", "/bin"};
+    size_t num_dirs = sizeof(allowed_dirs) / sizeof(allowed_dirs[0]);
+
+    char *cmd = c->execpath;
+
+    // Check if command contains a slash (explicit path)
+    if (strchr(cmd, '/') != NULL) {
+        // Treat as an explicit path
+        if (access(cmd, F_OK) == 0) {
+            return 0;
+        } else {
+            return 1;
+        }
+    }
+
+    // Search in allowed directories
+    char *token_path = NULL;
+    for (size_t i = 0; i < num_dirs; i++) {
+        size_t size_needed = strlen(allowed_dirs[i]) + strlen(cmd) + 2;
+        token_path = realloc(token_path, size_needed);
+        if (token_path == NULL) {
+            perror("realloc failed");
+            exit(EXIT_FAILURE);
+        }
+
+        snprintf(token_path, size_needed, "%s/%s", allowed_dirs[i], cmd);
+        if (access(token_path, F_OK) == 0) {
+            free(c->execpath);
+            c->execpath = strdup(token_path);
+            free(token_path);
+            return 0;
+        }
+    }
+
+    free(token_path);
+    return 1;
+}
+
 void execute_external_command(command *c) {
     pid_t pid = fork();
 
@@ -208,6 +248,13 @@ void execute_external_command(command *c) {
             perror("Memory allocation failed");
             exit(EXIT_FAILURE);
         }
+        int err = search_exec(c);
+
+        if (err != 0){
+            perror("Command not found");
+            free(argv);
+            return;
+        }
 
         argv[0] = c->execpath;
         for (size_t i = 0; i < c->args->size; i++) {
@@ -239,44 +286,51 @@ void myexit(command *c) {
     exit(EXIT_SUCCESS);
 }
 
+
+
 void mywhich(command *c) {
+    // Ensure there is exactly one argument in args
     if (c->args->size != 1) {
         fprintf(stderr, "Improper usage of which: which <command>\n");
         return;
     }
 
-    char *path_env = getenv("PATH");
-    char *path = strdup(path_env);
+    const char *allowed_dirs[] = {"/usr/local/bin", "/usr/bin", "/bin"};
+    size_t num_dirs = sizeof(allowed_dirs) / sizeof(allowed_dirs[0]);
 
-    if (path == NULL) {
-        perror("PATH variable not found.\n");
-        return;
-    }
-    char *token = strtok(path, ":");
-    char *token_path = NULL;
     char *cmd = c->args->val[0];
 
-    while (token != NULL) {
-        size_t size_needed = strlen(token) + strlen(cmd) + 2;
+    // Check if command contains a slash (explicit path)
+    if (strchr(cmd, '/') != NULL) {
+        // Treat as an explicit path
+        if (access(cmd, F_OK) == 0) {
+            printf("%s\n", cmd);
+            return;
+        } else {
+            return;
+        }
+    }
+
+    // Search in allowed directories
+    char *token_path = NULL;
+    for (size_t i = 0; i < num_dirs; ++i) {
+        size_t size_needed = strlen(allowed_dirs[i]) + strlen(cmd) + 2;
         token_path = realloc(token_path, size_needed);
         if (token_path == NULL) {
             perror("realloc failed");
             exit(EXIT_FAILURE);
         }
 
-        snprintf(token_path, size_needed, "%s/%s", token, cmd);
+        snprintf(token_path, size_needed, "%s/%s", allowed_dirs[i], cmd);
         if (access(token_path, F_OK) == 0) {
             printf("%s\n", token_path);
             free(token_path);
-            free(path);
             return;
         }
-
-        token = strtok(NULL, ":");
     }
 
     free(token_path);
-    free(path);
+    return;
 }
 
 void mypwd(command *c) {
