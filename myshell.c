@@ -33,7 +33,10 @@ typedef struct {
     size_t capacity;
 } arraylist_t;
 
-// Command structure
+// Forward declaration of command structure
+struct command;
+
+// Command structure with piping support
 typedef struct command {
     arraylist_t *args;
     char *execpath;
@@ -52,6 +55,12 @@ char *strdup(const char *s) {
     }
     return copy;
 }
+
+// Function prototypes
+void free_command(command *c);
+void free_arrlist(arraylist_t *al);
+int search_exec(command *c);
+void launcher(command *c);
 
 // Initialize dynamic string
 void init_dyn_string(dyn_string *str) {
@@ -143,29 +152,38 @@ void free_arrlist(arraylist_t *al) {
     }
 }
 
-// Free command structure
+// Free command structure with piping support
 void free_command(command *c) {
     if (c == NULL) return;
 
-    if (c->execpath) {
-        free(c->execpath);
-        c->execpath = NULL;
+    // Free the entire command chain
+    while (c != NULL) {
+        command *next = c->next_command;
+
+        if (c->execpath) {
+            free(c->execpath);
+            c->execpath = NULL;
+        }
+        if (c->inputfile) {
+            free(c->inputfile);
+            c->inputfile = NULL;
+        }
+        if (c->outputfile) {
+            free(c->outputfile);
+            c->outputfile = NULL;
+        }
+        if (c->args) {
+            free_arrlist(c->args);
+            free(c->args);
+            c->args = NULL;
+        }
+
+        free(c);
+        c = next;
     }
-    if (c->inputfile) {
-        free(c->inputfile);
-        c->inputfile = NULL;
-    }
-    if (c->outputfile) {
-        free(c->outputfile);
-        c->outputfile = NULL;
-    }
-    if (c->args) {
-        free_arrlist(c->args);
-        free(c->args);
-    }
-    free(c);
 }
 
+// Search for executable in allowed directories
 int search_exec(command *c) {
     const char *allowed_dirs[] = {"/usr/local/bin", "/usr/bin", "/bin"};
     size_t num_dirs = sizeof(allowed_dirs) / sizeof(allowed_dirs[0]);
@@ -205,6 +223,86 @@ int search_exec(command *c) {
     return 1;
 }
 
+// Execute piped commands
+void execute_piped_commands(command *first_cmd) {
+    int pipes[2][2];  // Two sets of pipe file descriptors
+    int in_fd = STDIN_FILENO;
+    command *current_cmd = first_cmd;
+    int pipe_index = 0;
+
+    while (current_cmd != NULL) {
+        // Perform executable search
+        if (search_exec(current_cmd) != 0) {
+            fprintf(stderr, "Command not found: %s\n", current_cmd->execpath);
+            return;
+        }
+
+        // Create pipe for next command (except for the last command)
+        if (current_cmd->next_command != NULL) {
+            if (pipe(pipes[pipe_index]) < 0) {
+                perror("Pipe creation failed");
+                return;
+            }
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("Fork failed");
+            return;
+        } else if (pid == 0) {  // Child process
+            // Handle input redirection or previous pipe's output
+            if (in_fd != STDIN_FILENO) {
+                if (dup2(in_fd, STDIN_FILENO) < 0) {
+                    perror("dup2 input failed");
+                    exit(EXIT_FAILURE);
+                }
+                close(in_fd);
+            }
+
+            // Handle output redirection or pipe to next command
+            if (current_cmd->next_command != NULL) {
+                if (dup2(pipes[pipe_index][1], STDOUT_FILENO) < 0) {
+                    perror("dup2 output failed");
+                    exit(EXIT_FAILURE);
+                }
+                close(pipes[pipe_index][0]);
+                close(pipes[pipe_index][1]);
+            }
+
+            // Execute the command
+            char **argv = malloc((current_cmd->args->size + 2) * sizeof(char *));
+            argv[0] = current_cmd->execpath;
+            for (size_t i = 0; i < current_cmd->args->size; i++) {
+                argv[i + 1] = current_cmd->args->val[i];
+            }
+            argv[current_cmd->args->size + 1] = NULL;
+
+            execv(current_cmd->execpath, argv);
+            perror("Exec failed");
+            exit(EXIT_FAILURE);
+        } else {  // Parent process
+            // Close unused pipe ends
+            if (current_cmd->next_command != NULL) {
+                close(pipes[pipe_index][1]);
+                in_fd = pipes[pipe_index][0];
+                pipe_index = 1 - pipe_index;  // Alternate between 0 and 1
+            }
+
+            // Wait for child to complete
+            int status;
+            waitpid(pid, &status, 0);
+        }
+
+        current_cmd = current_cmd->next_command;
+    }
+
+    // Close any remaining file descriptors
+    if (in_fd != STDIN_FILENO) {
+        close(in_fd);
+    }
+}
+
+// Execute external command
 void execute_external_command(command *c) {
     pid_t pid = fork();
 
@@ -275,7 +373,7 @@ void execute_external_command(command *c) {
     }
 }
 
-// Command implementations
+// Built-in command implementations
 void myexit(command *c) {
     for (int i = 0; i < c->args->size; i++) {
         printf("%s ", c->args->val[i]);
@@ -285,8 +383,6 @@ void myexit(command *c) {
     free_command(c);
     exit(EXIT_SUCCESS);
 }
-
-
 
 void mywhich(command *c) {
     // Ensure there is exactly one argument in args
@@ -364,33 +460,7 @@ void mycd(command *c) {
     }
 }
 
-// Launcher for built-in commands
-void launcher(command *c) {
-    // exit command
-    if (strcmp(c->execpath, "exit") == 0) {
-        myexit(c);
-    }
-    // which command 
-    else if (strcmp(c->execpath, "which") == 0) {
-        mywhich(c);
-        return;
-    }
-    // pwd command 
-    else if (strcmp(c->execpath, "pwd") == 0) {
-        mypwd(c);
-        return;
-    }
-    // cd command 
-    else if (strcmp(c->execpath, "cd") == 0) {
-        mycd(c);
-        return;
-    }
-    // For non-built-in commands, try to execute externally
-    else {
-        execute_external_command(c);
-    }
-}
-
+// Token parsing function
 tok_type next_token(char **cursor, dyn_string *token_value) {
     char *start = *cursor;
     
@@ -445,6 +515,37 @@ tok_type next_token(char **cursor, dyn_string *token_value) {
     return TOK_END;
 }
 
+// Launcher for built-in and external commands
+void launcher(command *c) {
+    // Check if this is a piped command sequence
+    if (c->next_command != NULL) {
+        execute_piped_commands(c);
+        return;
+    }
+
+    // Built-in commands
+    if (strcmp(c->execpath, "exit") == 0) {
+        myexit(c);
+    }
+    else if (strcmp(c->execpath, "which") == 0) {
+        mywhich(c);
+        return;
+    }
+    else if (strcmp(c->execpath, "pwd") == 0) {
+        mypwd(c);
+        return;
+    }
+    else if (strcmp(c->execpath, "cd") == 0) {
+        mycd(c);
+        return;
+    }
+    // For non-built-in commands, execute externally
+    else {
+        execute_external_command(c);
+    }
+}
+
+// Input parsing function with piping support
 void parse_input(int fd) {
     int bufsize = 4;  // Start with small initial size
     int total_bytes_read = 0;
@@ -502,19 +603,20 @@ void parse_input(int fd) {
     }
 
     // Create command structure
-    command *c = malloc(sizeof(command));
-    if (!c) {
+    command *first_cmd = malloc(sizeof(command));
+    if (!first_cmd) {
         perror("Failed to allocate command");
         free(buf);
         return;
     }
 
     // Initialize command fields
-    c->args = malloc(sizeof(arraylist_t));
-    init_arrlist(c->args);
-    c->execpath = NULL;
-    c->inputfile = NULL;
-    c->outputfile = NULL;
+    first_cmd->args = malloc(sizeof(arraylist_t));
+    init_arrlist(first_cmd->args);
+    first_cmd->execpath = NULL;
+    first_cmd->inputfile = NULL;
+    first_cmd->outputfile = NULL;
+    first_cmd->next_command = NULL;
 
     // Tokenize the command
     char *cursor = buf;
@@ -522,6 +624,7 @@ void parse_input(int fd) {
     init_dyn_string(&token_value);
 
     tok_type type;
+    command *current_cmd = first_cmd;
     int is_first_token = 1;
     int redir_in = 0;
     int redir_out = 0;
@@ -531,62 +634,74 @@ void parse_input(int fd) {
             case TOK_WORD:
                 if (is_first_token) {
                     // First token is the command/executable path
-                    c->execpath = strdup(token_value.data);
+                    current_cmd->execpath = strdup(token_value.data);
                     is_first_token = 0;
                 } else {
-
-                    if (redir_in == 1){
-                        c->inputfile = strdup(token_value.data);
+                    if (redir_in == 1) {
+                        current_cmd->inputfile = strdup(token_value.data);
                         redir_in = 0;
-                        break;
                     }
-                    else if (redir_out == 1){
-                        c->outputfile = strdup(token_value.data);
-                        redir_in = 0;
-                        break;
+                    else if (redir_out == 1) {
+                        current_cmd->outputfile = strdup(token_value.data);
+                        redir_out = 0;
                     }
-
-                    // Subsequent tokens are arguments
-                    arrlist_push(c->args, token_value.data);
+                    else {
+                        // Subsequent tokens are arguments
+                        arrlist_push(current_cmd->args, token_value.data);
+                    }
                 }
                 break;
             case TOK_REDIRECT_IN:
-                if (redir_in == 1 || redir_out == 1){
-                    fprintf(stdout, "Invalid syntax for redirection in: expected file");
+                if (redir_in == 1 || redir_out == 1) {
+                    fprintf(stderr, "Invalid syntax for redirection in\n");
+                    free_command(first_cmd);
                     free_dyn_string(&token_value);
-                    free_command(c);
                     free(buf);
                     return;
                 }
                 redir_in = 1;
                 break;
             case TOK_REDIRECT_OUT:
-            if (redir_in == 1 || redir_out == 1){
-                    fprintf(stdout, "Invalid syntax for redirection out: expected file");
+                if (redir_in == 1 || redir_out == 1) {
+                    fprintf(stderr, "Invalid syntax for redirection out\n");
+                    free_command(first_cmd);
                     free_dyn_string(&token_value);
-                    free_command(c);
                     free(buf);
                     return;
                 }
                 redir_out = 1;
                 break;
-            case TOK_PIPE:
+            case TOK_PIPE: {
+                // Create a new command for the next part of the pipe
+                command *next_cmd = malloc(sizeof(command));
+                next_cmd->args = malloc(sizeof(arraylist_t));
+                init_arrlist(next_cmd->args);
+                next_cmd->execpath = NULL;
+                next_cmd->inputfile = NULL;
+                next_cmd->outputfile = NULL;
+                next_cmd->next_command = NULL;
+
+                // Link the current command to the next
+                current_cmd->next_command = next_cmd;
+                current_cmd = next_cmd;
+                is_first_token = 1;
+                redir_in = 0;
+                redir_out = 0;
                 break;
-            case TOK_NEWLINE:
-                break;
+            }
             default:
                 break;
         }
     }
 
     // Launch built-in or external commands only if we have a valid execpath
-    if (c->execpath && strlen(c->execpath) > 0) {
-        launcher(c);
+    if (first_cmd->execpath && strlen(first_cmd->execpath) > 0) {
+        launcher(first_cmd);
     }
 
     // Free resources
     free_dyn_string(&token_value);
-    free_command(c);
+    free_command(first_cmd);
     free(buf);
 }
 
