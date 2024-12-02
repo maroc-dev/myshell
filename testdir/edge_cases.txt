@@ -1,0 +1,12 @@
+echo Long commands
+ls aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+echo Multiple spaces
+ls     -l     -a     
+
+echo Complex combinations
+touch input.txt
+echo test content > input.txt
+touch file10.txt
+cat < input.txt | sort | grep test > output.txt
+ls *.txt | grep file | sort > sorted_files.txt

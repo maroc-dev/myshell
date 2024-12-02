@@ -1,16 +1,16 @@
 CC = gcc
 CFLAGS = -std=c99 -Wall -Wvla -fsanitize=address,undefined -g
 
-TARGETS = myshell
+TARGETS = mysh
 
-myshell: myshell.o
-	$(CC) $(CFLAGS) myshell.o -o myshell
+myshell: mysh.o
+	$(CC) $(CFLAGS) mysh.o -o mysh
 
-myshell.o: myshell.c
-	$(CC) $(CFLAGS) -c myshell.c 
+myshell.o: mysh.c
+	$(CC) $(CFLAGS) -c mysh.c 
 
-run: myshell
-	./myshell
+run: mysh
+	./mysh
 
 clean:
 	rm -f *.o $(TARGETS)

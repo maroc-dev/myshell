@@ -1,0 +1,19 @@
+echo Input redirection
+touch input.txt
+echo "content" > input.txt
+touch unsorted.txt 
+echo c a b > unsorted.txt
+
+cat < input.txt
+cat < nonexistent.txt
+sort < unsorted.txt
+
+echo Output redirection
+echo "test" > output1.txt
+cat < input.txt > output2.txt
+ls > output3.txt
+ls nonexistent > error.txt
+
+echo Combined redirection
+cat < input.txt > output4.txt
+sort < unsorted.txt > sorted.txt

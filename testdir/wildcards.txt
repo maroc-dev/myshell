@@ -1,0 +1,22 @@
+echo Basic wildcard matching
+echo ls .txt
+cd testdir/wildcards
+ls *.txt
+echo file
+ls file*
+echo fi*.txt
+ls fi*.txt
+echo dat
+ls *dat
+echo dir1/
+ls dir1/*
+echo nonexistent
+ls nonexistent*
+
+echo Multiple wildcards
+ls *.txt *.dat
+ls dir1/*.txt dir1/*.dat
+
+echo Hidden files
+ls .*
+ls *

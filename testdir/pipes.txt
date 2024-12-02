@@ -1,0 +1,19 @@
+echo Basic pipes
+ls | wc -l
+touch input.txt
+echo input content test > input.txt
+cat input.txt | grep test
+echo "hello world" | grep hello
+
+echo Pipes with nonexistent commands
+nonexistentcmd | wc -l
+ls | nonexistentcmd
+
+echo Pipes with built-ins
+pwd | grep /
+echo should break because cd disallows piping and input redirection
+cd dir1 | pwd
+
+echo Pipes with redirection
+cat < input.txt | sort > sorted_output.txt
+ls | grep txt > textfiles.txt

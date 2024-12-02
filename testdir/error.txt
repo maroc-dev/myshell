@@ -1,0 +1,30 @@
+echo Syntax errors
+>
+<
+|
+ls >
+cat <
+ls |
+cd > output.txt
+
+echo Permission errors
+touch nonexecutable.sh
+chmod -x nonexecutable.sh
+./nonexecutable.sh
+echo "This file should not be readable" > input_noread.txt
+chmod 0 input_noread.txt
+echo Permissions should be denied
+cat < input_noread.txt
+touch output_nowrite.txt
+chmod 444 output_nowrite.txt
+echo test > output_nowrite.txt
+
+echo Missing files/directories
+cd /nonexistent
+cat nonexistent.txt
+./nonexistent.sh
+
+echo Invalid arguments
+cd dir1 dir2
+pwd arg1
+which

@@ -1,0 +1,13 @@
+echo Testing
+echo ls
+ls
+echo ls -l
+ls -l
+echo ls -la
+ls -la
+echo ls /bin/ls
+/bin/ls
+
+echo Testing invalid commands
+nonexistentcmd
+./nonexistent.sh
